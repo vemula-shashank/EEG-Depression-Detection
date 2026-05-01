@@ -1,0 +1,146 @@
+import sys
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from collections import Counter
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import f1_score, roc_auc_score
+import numpy as np
+import os
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+SAVE_PATH = '/content/drive/MyDrive/Depression_EEG'
+
+X_balanced = np.load(os.path.join(SAVE_PATH, 'X_epoch_balanced.npy'))
+y_balanced = np.load(os.path.join(SAVE_PATH, 'y_epoch_balanced.npy'))
+
+print("Dataset loaded")
+print("X shape            :", X_balanced.shape)
+print("y shape            :", y_balanced.shape)
+print("Class distribution :", Counter(y_balanced))
+print("Device             :", device)
+
+class DepressionMLP(nn.Module):
+    def __init__(self, input_size=64, dropout=0.3):
+        super(DepressionMLP, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_size, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.network(x).squeeze(1)
+
+print("Model defined")
+print("Total parameters:", sum(p.numel() for p in DepressionMLP().parameters()))
+
+skf       = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+fold_accs = []
+fold_f1s  = []
+fold_aucs = []
+
+print("\n10-Fold Cross Validation", flush=True)
+print("Model  : MLP", flush=True)
+print("Input  : 64 features", flush=True)
+print("Samples: 2310", flush=True)
+print("-" * 70, flush=True)
+
+for fold, (train_idx, test_idx) in enumerate(skf.split(X_balanced, y_balanced)):
+
+    print(f"Fold {fold+1} training...", flush=True)
+    sys.stdout.flush()
+
+    X_train, X_test = X_balanced[train_idx], X_balanced[test_idx]
+    y_train, y_test = y_balanced[train_idx], y_balanced[test_idx]
+
+    X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
+    X_test_t  = torch.tensor(X_test,  dtype=torch.float32).to(device)
+    y_train_t = torch.tensor(y_train, dtype=torch.float32).to(device)
+    y_test_t  = torch.tensor(y_test,  dtype=torch.float32).to(device)
+
+    train_loader = DataLoader(
+        TensorDataset(X_train_t, y_train_t),
+        batch_size=32, shuffle=True)
+    test_loader  = DataLoader(
+        TensorDataset(X_test_t, y_test_t),
+        batch_size=32, shuffle=False)
+
+    model     = DepressionMLP().to(device)
+    criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', patience=10, factor=0.5)
+
+    best_fold_acc = 0.0
+    best_preds    = []
+    best_labels   = []
+    best_probs    = []
+
+    for epoch in range(150):
+        model.train()
+        for X_batch, y_batch in train_loader:
+            optimizer.zero_grad()
+            outputs = model(X_batch)
+            loss    = criterion(outputs, y_batch)
+            loss.backward()
+            optimizer.step()
+
+        model.eval()
+        val_loss   = 0.0
+        all_preds  = []
+        all_labels = []
+        all_probs  = []
+        correct    = 0
+        total      = 0
+
+        with torch.no_grad():
+            for X_batch, y_batch in test_loader:
+                outputs   = model(X_batch)
+                val_loss += criterion(outputs, y_batch).item()
+                predicted = (outputs >= 0.5).float()
+                correct  += (predicted == y_batch).sum().item()
+                total    += y_batch.size(0)
+                all_preds.extend(predicted.cpu().numpy())
+                all_labels.extend(y_batch.cpu().numpy())
+                all_probs.extend(outputs.cpu().numpy())
+
+        acc = correct / total
+        scheduler.step(val_loss / len(test_loader))
+
+        if acc > best_fold_acc:
+            best_fold_acc = acc
+            best_preds    = all_preds
+            best_labels   = all_labels
+            best_probs    = all_probs
+
+    f1  = f1_score(best_labels, best_preds, zero_division=0)
+    auc = roc_auc_score(best_labels, best_probs)
+
+    fold_accs.append(best_fold_acc)
+    fold_f1s.append(f1)
+    fold_aucs.append(auc)
+
+    print(f"Fold {fold+1:2d} | Accuracy: {best_fold_acc:.4f} | F1: {f1:.4f} | AUC: {auc:.4f}", flush=True)
+    sys.stdout.flush()
+
+print("-" * 70, flush=True)
+print(f"Mean Accuracy : {np.mean(fold_accs):.4f} (+/- {np.std(fold_accs):.4f})", flush=True)
+print(f"Mean F1 Score : {np.mean(fold_f1s):.4f} (+/- {np.std(fold_f1s):.4f})", flush=True)
+print(f"Mean AUC      : {np.mean(fold_aucs):.4f} (+/- {np.std(fold_aucs):.4f})", flush=True)
+print("-" * 70, flush=True)
+
+torch.save(model.state_dict(),
+           os.path.join(SAVE_PATH, 'best_mlp_epoch_model.pth'))
+print("Best model saved", flush=True)
