@@ -1,0 +1,125 @@
+SHORT_SCALES = np.array([16, 32, 64])
+MID_SCALES   = np.array([64, 128, 256])
+LONG_SCALES  = np.array([128, 256, 512])
+KEY_CHANNELS = ['Fp1', 'Fp2', 'F3', 'F4', 'Cz', 'Pz', 'O1', 'O2']
+
+def compute_alpha(signal, scales):
+    signal = signal - np.mean(signal)
+    y      = np.cumsum(signal)
+    N      = len(signal)
+    flucts = []
+    for s in scales:
+        n_segments = N // s
+        if n_segments == 0:
+            continue
+        rms = []
+        for i in range(n_segments):
+            segment = y[i*s:(i+1)*s]
+            x       = np.arange(s)
+            coeffs  = np.polyfit(x, segment, 1)
+            trend   = np.polyval(coeffs, x)
+            rms.append(np.sqrt(np.mean((segment - trend)**2)))
+        flucts.append(np.sqrt(np.mean(np.array(rms)**2)))
+    log_scales = np.log2(scales)
+    log_F      = np.log2(flucts[:len(log_scales)])
+    alpha, _, _, _, _ = stats.linregress(log_scales, log_F)
+    return alpha
+
+def compute_band_power(signal, sfreq=256, band=(8, 13)):
+    from scipy.signal import welch
+    freqs, psd = welch(signal, sfreq, nperseg=min(256, len(signal)))
+    idx        = np.logical_and(freqs >= band[0], freqs <= band[1])
+    return np.trapz(psd[idx], freqs[idx])
+
+def compute_hjorth(signal):
+    diff1      = np.diff(signal)
+    diff2      = np.diff(diff1)
+    activity   = np.var(signal)
+    mobility   = np.sqrt(np.var(diff1) / (activity + 1e-10))
+    complexity = np.sqrt(np.var(diff2) / (np.var(diff1) + 1e-10)) / (mobility + 1e-10)
+    return mobility, complexity
+
+def extract_features_rich(subject_id):
+    eeg_folder = os.path.join(RAW_EEG_PATH, subject_id, 'eeg')
+    set_file   = os.path.join(eeg_folder,
+                     f'{subject_id}_task-Rest_run-01_eeg.set')
+
+    if not os.path.exists(set_file):
+        print("File missing:", subject_id)
+        return None, None
+
+    raw = mne.io.read_raw_eeglab(set_file, preload=True, verbose=False)
+    raw.pick_types(eeg=True)
+    raw.rename_channels(lambda x: x.capitalize())
+
+    available = [ch for ch in KEY_CHANNELS if ch in raw.ch_names]
+    raw.pick_channels(available)
+
+    montage = mne.channels.make_standard_montage('standard_1005')
+    raw.set_montage(montage, on_missing='ignore')
+    raw.set_eeg_reference('average', verbose=False)
+    raw.filter(l_freq=0.5, h_freq=45.0,
+               method='fir', phase='zero', verbose=False)
+
+    epochs = mne.make_fixed_length_epochs(
+        raw, duration=4.0, overlap=0.0,
+        preload=True, verbose=False)
+
+    X       = epochs.get_data()
+    X       = X[:10]
+    sfreq   = raw.info['sfreq']
+
+    channel_features = []
+
+    for ch in range(X.shape[1]):
+        ch_alpha_short = []
+        ch_alpha_mid   = []
+        ch_alpha_long  = []
+        ch_sampen      = []
+        ch_permen      = []
+        ch_alpha_band  = []
+        ch_mobility    = []
+        ch_complexity  = []
+
+        for epoch in range(X.shape[0]):
+            signal = X[epoch, ch, :]
+
+            # MDFA features
+            ch_alpha_short.append(compute_alpha(signal, SHORT_SCALES))
+            ch_alpha_mid.append(compute_alpha(signal, MID_SCALES))
+            ch_alpha_long.append(compute_alpha(signal, LONG_SCALES))
+
+            # Entropy features
+            ch_sampen.append(ant.sample_entropy(signal, order=2))
+            ch_permen.append(ant.perm_entropy(signal, order=3,
+                                              delay=1, normalize=True))
+
+            # Band power (alpha band 8-13 Hz)
+            ch_alpha_band.append(compute_band_power(signal, sfreq=sfreq))
+
+            # Hjorth parameters
+            mob, comp = compute_hjorth(signal)
+            ch_mobility.append(mob)
+            ch_complexity.append(comp)
+
+        channel_features.extend([
+            np.nanmean(ch_alpha_short),
+            np.nanmean(ch_alpha_mid),
+            np.nanmean(ch_alpha_long),
+            np.nanmean(ch_sampen),
+            np.nanmean(ch_permen),
+            np.nanmean(ch_alpha_band),
+            np.nanmean(ch_mobility),
+            np.nanmean(ch_complexity)
+        ])
+
+    features = np.array(channel_features)  # 8 channels x 8 = 64 features
+
+    label = labels_df.loc[
+        labels_df['participant_id'] == subject_id, 'label'
+    ].values[0]
+
+    return features, label
+
+print("Rich feature extractor ready")
+print("Features per subject: 8 channels x 8 = 64")
