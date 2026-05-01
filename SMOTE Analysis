@@ -1,0 +1,24 @@
+from collections import Counter
+
+X = np.load(os.path.join(SAVE_PATH, 'X_epoch_features.npy'))
+y = np.load(os.path.join(SAVE_PATH, 'y_epoch_labels.npy'))
+
+print("Dataset loaded")
+print("X shape                        :", X.shape)
+print("y shape                        :", y.shape)
+print("Class distribution before SMOTE:", Counter(y))
+
+scaler   = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+smote                  = SMOTE(random_state=42)
+X_balanced, y_balanced = smote.fit_resample(X_scaled, y)
+
+print("Class distribution after SMOTE :", Counter(y_balanced))
+print("X balanced shape               :", X_balanced.shape)
+print("y balanced shape               :", y_balanced.shape)
+
+np.save(os.path.join(SAVE_PATH, 'X_epoch_balanced.npy'), X_balanced)
+np.save(os.path.join(SAVE_PATH, 'y_epoch_balanced.npy'), y_balanced)
+
+print("Balanced dataset saved")
