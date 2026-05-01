@@ -1,0 +1,57 @@
+import time
+import sys
+
+subject_ids = labels_df['participant_id'].values
+total       = len(subject_ids)
+X_all       = []
+y_all       = []
+failed      = []
+
+print("Starting epoch level extraction for", total, "subjects", flush=True)
+print("15 epochs per subject", flush=True)
+print("Expected time: 35-45 minutes", flush=True)
+print("-" * 50, flush=True)
+
+start_total = time.time()
+
+for idx, sid in enumerate(subject_ids):
+    start = time.time()
+    try:
+        epoch_feats, label = extract_epoch_features(sid)
+
+        if epoch_feats is not None:
+            for ef in epoch_feats:
+                X_all.append(ef)
+                y_all.append(label)
+
+            elapsed = time.time() - start
+            print(f"[{idx+1:3d}/{total}] {sid} | {'Depressed' if label==1 else 'Healthy  '} | {elapsed:.1f}s | epochs: {len(epoch_feats)}", flush=True)
+        else:
+            failed.append(sid)
+
+    except Exception as e:
+        failed.append(sid)
+        print(f"[{idx+1:3d}/{total}] {sid} failed: {e}", flush=True)
+
+    if (idx + 1) % 20 == 0:
+        np.save(os.path.join(SAVE_PATH, 'X_epoch_checkpoint.npy'), np.array(X_all))
+        np.save(os.path.join(SAVE_PATH, 'y_epoch_checkpoint.npy'), np.array(y_all))
+        elapsed_total = (time.time() - start_total) / 60
+        remaining = (elapsed_total / (idx+1)) * (total - idx - 1)
+        print(f"\nCheckpoint saved | Elapsed: {elapsed_total:.1f} min | Remaining: {remaining:.1f} min\n", flush=True)
+
+X_all = np.array(X_all)
+y_all = np.array(y_all)
+
+np.save(os.path.join(SAVE_PATH, 'X_epoch_features.npy'), X_all)
+np.save(os.path.join(SAVE_PATH, 'y_epoch_labels.npy'), y_all)
+
+total_time = (time.time() - start_total) / 60
+print("-" * 50, flush=True)
+print("Extraction complete", flush=True)
+print("X shape :", X_all.shape, flush=True)
+print("y shape :", y_all.shape, flush=True)
+print("Total samples :", len(X_all), flush=True)
+print("Successful :", total - len(failed), flush=True)
+print("Failed :", len(failed), flush=True)
+print("Total time :", round(total_time, 2), "minutes", flush=True)
